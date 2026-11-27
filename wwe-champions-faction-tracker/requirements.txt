@@ -1,6 +1,0 @@
-# Core app uses only the Python standard library (tkinter + sqlite3).
-# OCR is optional: with these installed (plus the Tesseract binary) the app
-# can read screenshots directly; without them it falls back to pasted OCR
-# text or manual entry with a correction screen.
-Pillow>=10.0
-pytesseract>=0.3.10
