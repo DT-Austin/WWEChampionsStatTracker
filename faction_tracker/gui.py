@@ -75,6 +75,39 @@ def _big_button(parent: ttk.Frame, text: str, command) -> None:
     ttk.Button(parent, text=text, command=command, width=36).pack(pady=6)
 
 
+def _numeric_sort_value(value: str) -> float:
+    cleaned = value.replace(",", "").replace("%", "").strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return float("-inf")
+
+
+def _make_sortable(tree: ttk.Treeview, titles: dict[str, str], numeric_columns: set[str] | None = None) -> None:
+    """Make Treeview headings clickable to sort ascending/descending."""
+    numeric_columns = numeric_columns or set()
+    directions: dict[str, bool] = {}
+
+    def sort(column: str) -> None:
+        reverse = directions.get(column, False)
+        items = [(tree.set(item, column), item) for item in tree.get_children("")]
+        if column in numeric_columns:
+            items.sort(key=lambda pair: _numeric_sort_value(pair[0]), reverse=reverse)
+        else:
+            items.sort(key=lambda pair: pair[0].lower(), reverse=reverse)
+        for index, (_value, item) in enumerate(items):
+            tree.move(item, "", index)
+        directions[column] = not reverse
+        for col, title in titles.items():
+            arrow = ""
+            if col == column:
+                arrow = " ▼" if reverse else " ▲"
+            tree.heading(col, text=f"{title}{arrow}")
+
+    for column, title in titles.items():
+        tree.heading(column, text=title, command=lambda col=column: sort(col))
+
+
 class MainMenuScreen(ttk.Frame):
     def __init__(self, parent, app: TrackerApp):
         super().__init__(parent)
@@ -217,8 +250,7 @@ class ImportScreen(ttk.Frame):
         ttk.Button(buttons, text="Save", command=self.save_event).pack(side="right", padx=2)
 
         self.tree = ttk.Treeview(self.member_frame, columns=("name", "score"), show="headings")
-        self.tree.heading("name", text="Member")
-        self.tree.heading("score", text="Score")
+        _make_sortable(self.tree, {"name": "Member", "score": "Score"}, numeric_columns={"score"})
         self.tree.pack(fill="both", expand=True, padx=8, pady=8)
         self.tree.bind("<Double-1>", self.edit_pending_row)
         self.status = tk.StringVar(value="Double-click a row to correct OCR mistakes before saving.")
@@ -354,8 +386,8 @@ class ImportScreen(ttk.Frame):
     def _show_pending(self, warnings: list[str]) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for row in self.pending_rows:
-            self.tree.insert("", "end", values=(row.name, f"{row.score:,}"))
+        for index, row in enumerate(self.pending_rows):
+            self.tree.insert("", "end", iid=str(index), values=(row.name, f"{row.score:,}"))
         message = f"{len(self.pending_rows)} member rows ready."
         if warnings:
             message += " Warnings: " + " | ".join(warnings)
@@ -466,7 +498,7 @@ class ImportScreen(ttk.Frame):
         selection = self.tree.selection()
         if not selection:
             return
-        index = self.tree.index(selection[0])
+        index = int(selection[0]) if selection[0].isdigit() else self.tree.index(selection[0])
         row = self.pending_rows[index]
         name = simpledialog.askstring("Correct row", "Member name:", initialvalue=row.name, parent=self)
         if name is None:
@@ -570,14 +602,19 @@ class PreviousStatsScreen(ttk.Frame):
         ttk.Button(controls, text="New month (archive current)", command=self.new_month).pack(side="left", padx=6)
         ttk.Button(controls, text="Export month CSV", command=self.export_month).pack(side="left", padx=2)
 
+        self.summary_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.summary_var, wraplength=940).pack(fill="x", padx=8, pady=2)
         self.tree = ttk.Treeview(
             self, columns=("member", "total", "tracked", "missed", "zeros", "percent", "flag"), show="headings"
         )
-        for column, title in (
-            ("member", "Member"), ("total", "Total score"), ("tracked", "Events"),
-            ("missed", "Missed"), ("zeros", "Zeros"), ("percent", "Missed %"), ("flag", "Flag"),
-        ):
-            self.tree.heading(column, text=title)
+        _make_sortable(
+            self.tree,
+            {
+                "member": "Member", "total": "Total score", "tracked": "Events",
+                "missed": "Missed", "zeros": "Zeros", "percent": "Missed %", "flag": "Flag",
+            },
+            numeric_columns={"total", "tracked", "missed", "zeros", "percent"},
+        )
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
 
         ttk.Label(self, text="Events in month:").pack(anchor="w", padx=8)
@@ -603,7 +640,27 @@ class PreviousStatsScreen(ttk.Frame):
         if months:
             self.month_combo.current(current_index if 0 <= current_index < len(months) else 0)
         month = self._selected_month()
-        stats = monthly_stats(self.app.db.list_events(month.id), self.app.db.list_members(), self.app.settings)
+        events = self.app.db.list_events(month.id)
+        members = self.app.db.list_members()
+        stats = monthly_stats(events, members, self.app.settings)
+        tracked = [entry for entry in stats.values() if entry.units_tracked > 0]
+        passed = sum(1 for entry in tracked if entry.units_missed == 0)
+        missed = sum(1 for entry in tracked if entry.units_missed > 0)
+        flagged = sum(1 for entry in tracked if entry.flagged(self.app.settings))
+        if len(events) == 1:
+            minimum = self.app.settings.event_minimum(events[0])
+            minimum_text = f"minimum {minimum:,}" if minimum is not None else "no fixed minimum"
+            self.summary_var.set(
+                f"{events[0].name}: {minimum_text} — {passed} passed, {missed} missed. "
+                "Rows are sorted with misses first; click a heading to re-sort."
+            )
+        elif events:
+            self.summary_var.set(
+                f"{len(events)} events tracked — {flagged} flagged at "
+                f">={self.app.settings.monthly_flag_percent:g}% missed. Click a heading to re-sort."
+            )
+        else:
+            self.summary_var.set("No events saved in this month yet.")
         for item in self.tree.get_children():
             self.tree.delete(item)
         for entry in sorted(stats.values(), key=lambda s: (-s.missed_percent, s.member.lower())):
@@ -616,9 +673,13 @@ class PreviousStatsScreen(ttk.Frame):
                 ),
             )
         self.events_list.delete(0, "end")
-        for event in self.app.db.list_events(month.id):
+        for event in events:
+            minimum = self.app.settings.event_minimum(event)
+            minimum_text = f", min {minimum:,}" if minimum is not None else ""
             self.events_list.insert(
-                "end", f"{event.event_date.isoformat()} — {event.name} ({event.event_type.value}, {len(event.scores)} members)"
+                "end",
+                f"{event.event_date.isoformat()} — {event.name} "
+                f"({event.event_type.value}, {len(event.scores)} members{minimum_text})",
             )
 
     def new_month(self) -> None:
@@ -656,9 +717,10 @@ class MembersScreen(ttk.Frame):
         self.app = app
         _header(self, app, "Member list", "main")
         self.tree = ttk.Treeview(self, columns=("name", "status", "exempt_until"), show="headings")
-        self.tree.heading("name", text="Member")
-        self.tree.heading("status", text="Status")
-        self.tree.heading("exempt_until", text="Exempt until")
+        _make_sortable(
+            self.tree,
+            {"name": "Member", "status": "Status", "exempt_until": "Exempt until"},
+        )
         self.tree.pack(fill="both", expand=True, padx=8, pady=8)
         buttons = ttk.Frame(self)
         buttons.pack(fill="x", padx=8, pady=4)
