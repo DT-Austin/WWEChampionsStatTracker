@@ -101,10 +101,16 @@ def classify_screen(text: str) -> str:
 
 
 def parse_milestone_total(text: str) -> int | None:
-    """Highest milestone value on the milestones screen (the bottom value)."""
+    """Highest milestone value on the milestones screen (the bottom value).
+
+    OCR often turns the commas in these small white-on-dark numbers into
+    semicolons, colons, braces, or similar marks (for example
+    "180}000;000"), so digit separators are normalized before parsing.
+    """
+    normalized = re.sub(r"(?<=\d)[;:{})°](?=\d)", ",", text)
     values = [
         _to_int(tok)
-        for tok in _SCORE_RE.findall(text)
+        for tok in _SCORE_RE.findall(normalized)
         if _GROUPED_SCORE_RE.fullmatch(tok) and _to_int(tok) >= 1_000_000
     ]
     return max(values) if values else None

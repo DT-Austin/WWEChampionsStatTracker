@@ -52,6 +52,15 @@ MILESTONES = """MILESTONE REWARDS
 180,000,000
 """
 
+MILESTONES_OCR = """MILESTONE REWARDS
+5,169;999
+18,089;999|
+'38,759;999)
+59)429:999|
+119,709,999)
+180}000;000
+"""
+
 FACTION_EVENT_BOARD = """LEADERBOARD
 LEADERS MY FACTION
 RANK PLAYER
@@ -112,6 +121,11 @@ class ParserTests(unittest.TestCase):
     def test_milestone_total_is_highest_value(self):
         self.assertEqual(parse_milestone_total(MILESTONES), 180_000_000)
         result = parse_screenshot_text(MILESTONES)
+        self.assertEqual(result.screen_type, "milestones")
+        self.assertEqual(result.milestone_total, 180_000_000)
+
+    def test_milestone_total_handles_ocr_separator_misreads(self):
+        result = parse_screenshot_text(MILESTONES_OCR)
         self.assertEqual(result.screen_type, "milestones")
         self.assertEqual(result.milestone_total, 180_000_000)
 
