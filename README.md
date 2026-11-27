@@ -58,6 +58,11 @@ pip install -r requirements.txt   # Pillow + pytesseract
 # plus the Tesseract binary: https://github.com/tesseract-ocr/tesseract
 ```
 
+On Windows, the app looks for Tesseract on `PATH`, in the standard
+`C:\Program Files\Tesseract-OCR` install folder, and in a few other common
+locations. If Tesseract is installed somewhere else, set the
+`TESSERACT_CMD` environment variable to the full path of `tesseract.exe`.
+
 Without OCR installed, the app still works: paste OCR text from any tool,
 or enter rows manually and correct them on the import screen.
 
