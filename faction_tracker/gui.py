@@ -15,10 +15,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .database import Database
 from .export import export_event_csv, export_month_csv
-from .models import Event, EventType, MemberScore
+from .models import Event, EventType, MemberScore, MemberStatus
 from .ocr import OCRUnavailable, ocr_available, ocr_image
 from .parser import merge_parse_results, parse_milestone_total, parse_screenshot_text
-from .rules import Settings, monthly_stats
+from .rules import Settings, event_score_rows, monthly_stats
 
 
 class TrackerApp(tk.Tk):
@@ -617,10 +617,15 @@ class PreviousStatsScreen(ttk.Frame):
         )
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
 
-        ttk.Label(self, text="Events in month:").pack(anchor="w", padx=8)
+        ttk.Label(self, text="Events in month (click one to view its scores):").pack(anchor="w", padx=8)
         self.events_list = tk.Listbox(self, height=7)
         self.events_list.pack(fill="x", padx=8, pady=4)
+        self.events_list.bind("<<ListboxSelect>>", self._on_event_select)
         ttk.Button(self, text="Export selected event CSV", command=self.export_event).pack(padx=8, pady=4)
+        self._events: list[Event] = []
+        self._members = []
+        self._stats: dict = {}
+        self._event_entries: list[Event | None] = []
 
     def _months(self):
         return self.app.db.list_months()
@@ -640,30 +645,72 @@ class PreviousStatsScreen(ttk.Frame):
         if months:
             self.month_combo.current(current_index if 0 <= current_index < len(months) else 0)
         month = self._selected_month()
-        events = self.app.db.list_events(month.id)
-        members = self.app.db.list_members()
-        stats = monthly_stats(events, members, self.app.settings)
-        tracked = [entry for entry in stats.values() if entry.units_tracked > 0]
+        self._events = self.app.db.list_events(month.id)
+        self._members = self.app.db.list_members()
+        self._stats = monthly_stats(self._events, self._members, self.app.settings)
+        self.events_list.delete(0, "end")
+        self._event_entries = [None]
+        self.events_list.insert("end", "Month total — all events combined")
+        for event in self._events:
+            minimum = self.app.settings.event_minimum(event)
+            minimum_text = f", min {minimum:,}" if minimum is not None else ""
+            self._event_entries.append(event)
+            self.events_list.insert(
+                "end",
+                f"{event.event_date.isoformat()} — {event.name} "
+                f"({event.event_type.value}, {len(event.scores)} members{minimum_text})",
+            )
+        self.events_list.selection_clear(0, "end")
+        self.events_list.selection_set(0)
+        self._show_month_total()
+
+    def _on_event_select(self, _event=None) -> None:
+        selection = self.events_list.curselection()
+        if not selection:
+            return
+        entry = self._event_entries[selection[0]]
+        if entry is None:
+            self._show_month_total()
+        else:
+            self._show_event(entry)
+
+    def _clear_tree(self) -> None:
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+    def _show_month_total(self) -> None:
+        self.tree.configure(
+            columns=("member", "total", "tracked", "missed", "zeros", "percent", "flag")
+        )
+        _make_sortable(
+            self.tree,
+            {
+                "member": "Member", "total": "Total score", "tracked": "Events",
+                "missed": "Missed", "zeros": "Zeros", "percent": "Missed %", "flag": "Flag",
+            },
+            numeric_columns={"total", "tracked", "missed", "zeros", "percent"},
+        )
+        tracked = [entry for entry in self._stats.values() if entry.units_tracked > 0]
         passed = sum(1 for entry in tracked if entry.units_missed == 0)
         missed = sum(1 for entry in tracked if entry.units_missed > 0)
         flagged = sum(1 for entry in tracked if entry.flagged(self.app.settings))
-        if len(events) == 1:
-            minimum = self.app.settings.event_minimum(events[0])
+        if len(self._events) == 1:
+            minimum = self.app.settings.event_minimum(self._events[0])
             minimum_text = f"minimum {minimum:,}" if minimum is not None else "no fixed minimum"
             self.summary_var.set(
-                f"{events[0].name}: {minimum_text} — {passed} passed, {missed} missed. "
-                "Rows are sorted with misses first; click a heading to re-sort."
+                f"Month total — {self._events[0].name}: {minimum_text} — {passed} passed, {missed} missed. "
+                "Click the event below for individual scores, or a heading to re-sort."
             )
-        elif events:
+        elif self._events:
             self.summary_var.set(
-                f"{len(events)} events tracked — {flagged} flagged at "
-                f">={self.app.settings.monthly_flag_percent:g}% missed. Click a heading to re-sort."
+                f"Month total — {len(self._events)} events tracked, {flagged} flagged at "
+                f">={self.app.settings.monthly_flag_percent:g}% missed. "
+                "Click an event below for individual scores."
             )
         else:
             self.summary_var.set("No events saved in this month yet.")
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for entry in sorted(stats.values(), key=lambda s: (-s.missed_percent, s.member.lower())):
+        self._clear_tree()
+        for entry in sorted(self._stats.values(), key=lambda s: (-s.missed_percent, s.member.lower())):
             self.tree.insert(
                 "", "end",
                 values=(
@@ -672,14 +719,55 @@ class PreviousStatsScreen(ttk.Frame):
                     "FLAGGED" if entry.flagged(self.app.settings) else "",
                 ),
             )
-        self.events_list.delete(0, "end")
-        for event in events:
+
+    def _show_event(self, event: Event) -> None:
+        self.tree.configure(columns=("member", "score", "status"))
+        _make_sortable(
+            self.tree,
+            {"member": "Member", "score": "Score", "status": "Status"},
+            numeric_columns={"score"},
+        )
+        weekend_feuds = None
+        if event.event_type is EventType.FLASH_FEUD:
+            weekend_feuds = [
+                e for e in self._events
+                if e.event_type is EventType.FLASH_FEUD and e.weekend_id == event.weekend_id
+            ]
+        rows = event_score_rows(event, self._members, self.app.settings, weekend_feuds)
+        labels = {
+            MemberStatus.PASS: "Pass",
+            MemberStatus.FLAGGED: "Missed minimum",
+            MemberStatus.ZERO: "Zero",
+            MemberStatus.ABSENT: "Absent",
+            MemberStatus.EXEMPT: "Exempt",
+        }
+        passed = sum(1 for _name, _score, status in rows if status is MemberStatus.PASS)
+        missed = sum(
+            1 for _name, _score, status in rows
+            if status in (MemberStatus.FLAGGED, MemberStatus.ZERO, MemberStatus.ABSENT)
+        )
+        if event.event_type is EventType.FLASH_FEUD:
+            self.summary_var.set(
+                f"{event.name} ({event.weekend_id}): scores for this feud; status is the weekend result "
+                f"(total >={self.app.settings.flash_weekend_total_min:,} and "
+                f">={self.app.settings.flash_min_participation} feuds) — {passed} passed, {missed} missed."
+            )
+        else:
             minimum = self.app.settings.event_minimum(event)
-            minimum_text = f", min {minimum:,}" if minimum is not None else ""
-            self.events_list.insert(
-                "end",
-                f"{event.event_date.isoformat()} — {event.name} "
-                f"({event.event_type.value}, {len(event.scores)} members{minimum_text})",
+            minimum_text = f"minimum {minimum:,}" if minimum is not None else "no fixed minimum"
+            self.summary_var.set(
+                f"{event.name}: {minimum_text} — {passed} passed, {missed} missed. "
+                "Click a heading to re-sort."
+            )
+        self._clear_tree()
+        for name, score, status in rows:
+            self.tree.insert(
+                "", "end",
+                values=(
+                    name,
+                    f"{score:,}" if score is not None else "—",
+                    labels.get(status, "") if status is not None else "",
+                ),
             )
 
     def new_month(self) -> None:
@@ -701,13 +789,13 @@ class PreviousStatsScreen(ttk.Frame):
 
     def export_event(self) -> None:
         selection = self.events_list.curselection()
-        if not selection:
-            messagebox.showwarning("No selection", "Select an event first.")
+        if not selection or self._event_entries[selection[0]] is None:
+            messagebox.showwarning("No event selected", "Select an event (Month total uses Export month CSV).")
             return
-        events = self.app.db.list_events(self._selected_month().id)
+        event = self._event_entries[selection[0]]
         path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
         if path:
-            export_event_csv(events[selection[0]], self.app.db.list_members(), self.app.settings, path)
+            export_event_csv(event, self.app.db.list_members(), self.app.settings, path)
             messagebox.showinfo("Exported", f"Event CSV written to {path}")
 
 

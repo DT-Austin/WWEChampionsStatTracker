@@ -89,6 +89,30 @@ def evaluate_flash_weekend(
     return result
 
 
+def event_score_rows(
+    event: Event,
+    members: list[Member],
+    settings: Settings,
+    weekend_feuds: list[Event] | None = None,
+) -> list[tuple[str, int | None, MemberStatus | None]]:
+    """Rows for viewing one event: (member, score in this event, status).
+
+    Flash feuds show this feud's score with the member's weekend status.
+    Rows sort by score descending, with absent members last.
+    """
+    if event.event_type is EventType.FLASH_FEUD:
+        statuses = evaluate_flash_weekend(weekend_feuds or [event], members, settings)
+    else:
+        statuses = evaluate_event(event, members, settings)
+    rows = [
+        (member.name, event.scores.get(member.name), statuses.get(member.name))
+        for member in members
+        if member.active
+    ]
+    rows.sort(key=lambda row: (-(row[1] if row[1] is not None else -1), row[0].lower()))
+    return rows
+
+
 @dataclass
 class MonthlyStats:
     member: str

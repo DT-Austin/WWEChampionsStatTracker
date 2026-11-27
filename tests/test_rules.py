@@ -4,7 +4,7 @@ import unittest
 from datetime import date
 
 from faction_tracker.models import Event, EventType, Member, MemberStatus
-from faction_tracker.rules import Settings, evaluate_event, evaluate_flash_weekend, monthly_stats
+from faction_tracker.rules import Settings, evaluate_event, evaluate_flash_weekend, event_score_rows, monthly_stats
 
 D = date(2026, 11, 27)
 
@@ -44,6 +44,18 @@ class RuleTests(unittest.TestCase):
         result = evaluate_event(event, members("A", "B"), self.settings)
         self.assertEqual(result["A"], MemberStatus.PASS)
         self.assertEqual(result["B"], MemberStatus.FLAGGED)
+
+    def test_event_score_rows_sorted_with_statuses(self):
+        event = Event(
+            id=None, month_id=1, event_type=EventType.FACTION_EVENT, name="Event",
+            event_date=D, milestone_total=180_000_000,
+            scores={"B": 1_000_000, "A": 5_000_000, "C": 0},
+        )
+        rows = event_score_rows(event, members("A", "B", "C", "D"), self.settings)
+        self.assertEqual(rows[0], ("A", 5_000_000, MemberStatus.PASS))
+        self.assertEqual(rows[1], ("B", 1_000_000, MemberStatus.FLAGGED))
+        self.assertEqual(rows[2], ("C", 0, MemberStatus.ZERO))
+        self.assertEqual(rows[3], ("D", None, MemberStatus.ABSENT))
 
     def test_flash_weekend_total_excuses_missed_fourth(self):
         feuds = [
