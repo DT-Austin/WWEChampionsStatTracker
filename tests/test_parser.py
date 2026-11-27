@@ -84,6 +84,48 @@ My Rank
 The Sworn Few
 """
 
+FACTION_EVENT_BOARD_OCR = """LEADERBOARD
+RANK |
+PLAYER
+|
+POINTS
+1cc6f865eda347ebb522a7 ehG6eb8713a
+The Sworn Few
+Gy 14,118,170
+nickko220395
+The Sworn Few
+Gy 13,051,120
+Chrislaw79
+The Sworn Few
+Gy) 9,083,090
+Robert507956
+The Sworn Few
+Gy) 8,525,740
+kaiden2018
+The Sworn Few
+Gy) 8,076,310
+chux5w
+The Sworn Few
+Gy) 7,522,190
+The Brain2017
+The Sworn Few
+Gy) 7,478,490
+Lash210554
+The Sworn Few
+Gy) 7,106,290
+cbward91
+The Sworn Few
+Gy) 6,759,750
+710
+Singh 86
+The Sworn Few
+t 6,702,690
+Points
+nes bustinmag?
+The Sworn Few
+W 6,063,200
+"""
+
 
 class ParserTests(unittest.TestCase):
     def test_feud_faction_tab_rows_match_sample_data(self):
@@ -128,6 +170,18 @@ class ParserTests(unittest.TestCase):
         result = parse_screenshot_text(MILESTONES_OCR)
         self.assertEqual(result.screen_type, "milestones")
         self.assertEqual(result.milestone_total, 180_000_000)
+
+    def test_faction_event_board_multiline_ocr(self):
+        result = parse_screenshot_text(FACTION_EVENT_BOARD_OCR)
+        parsed = {row.name: row.score for row in result.member_scores}
+        self.assertEqual(result.screen_type, "faction_event_leaderboard")
+        self.assertEqual(len(result.member_scores), 10)
+        self.assertEqual(parsed["nickko220395"], 13_051_120)
+        self.assertEqual(parsed["Robert507956"], 8_525_740)
+        self.assertEqual(parsed["The Brain2017"], 7_478_490)
+        self.assertEqual(parsed["Singh 86"], 6_702_690)
+        self.assertNotIn("Austinmdg2", parsed)
+        self.assertEqual(result.warnings, [])
 
     def test_my_rank_bar_is_ignored(self):
         rows = parse_member_rows(FACTION_EVENT_BOARD)

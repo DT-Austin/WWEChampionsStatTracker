@@ -24,6 +24,11 @@ from .models import FactionResult, MemberScore, ParseResult
 # or a bare 0 / small int.
 _GROUPED_SCORE_RE = re.compile(r"\d{1,3}(?:[,.]\d{3})+")
 _SCORE_RE = re.compile(r"\d{1,3}(?:[,.]\d{3})+|\d+")
+# Scores must stand alone; digits glued to a username (Robert507956) are not scores.
+_STANDALONE_SCORE_RE = re.compile(
+    r"(?<![A-Za-z0-9])\d{1,3}(?:[,.]\d{3})+(?![A-Za-z0-9])"
+    r"|(?<![A-Za-z0-9])\d+(?![A-Za-z0-9])"
+)
 _LEVEL_RE = re.compile(r"\bLEVEL\s*\d+\b", re.IGNORECASE)
 _TIER_RE = re.compile(r"\bTIER\s*(\d+)\b", re.IGNORECASE)
 _MEMBERS_RE = re.compile(r"\bMEMBERS:?\s*(\d+)\b", re.IGNORECASE)
@@ -40,6 +45,7 @@ _NOISE_WORDS = {
 }
 # Standalone OCR junk from faction icons/logos next to names and scores.
 _FACTION_JUNK_WORDS = {"gi", "ww", "w", "wy", "ws", "g", "i", "feinis"}
+_MEMBER_JUNK_WORDS = _FACTION_JUNK_WORDS | {"gy", "hy", "t", "a", "y", "ky", "my", "ms", "mi"}
 
 
 def _to_int(token: str) -> int:
@@ -55,10 +61,26 @@ def _is_score_token(token: str) -> bool:
 
 
 def _strip_my_rank_bar(text: str) -> str:
-    """Drop the pinned 'My Rank' overlay (it sits at the bottom of the screen)."""
+    """Drop the pinned 'My Rank' overlay (it sits at the bottom of the screen).
+
+    OCR sometimes garbles the words "My Rank" but still reads the bar's
+    standalone "Points" label after the scrolling rows, so that label is
+    also treated as the start of the pinned bar when it appears after a
+    score. The table header is "RANK PLAYER POINTS" on one line and is
+    not affected.
+    """
     match = re.search(r"\bMy\s+Rank\b", text, re.IGNORECASE)
     if match:
         return text[: match.start()]
+    lines = text.splitlines(keepends=True)
+    seen_score = False
+    offset = 0
+    for line in lines:
+        if _GROUPED_SCORE_RE.search(line):
+            seen_score = True
+        if seen_score and line.strip().lower() == "points":
+            return text[:offset]
+        offset += len(line)
     return text
 
 
@@ -123,39 +145,96 @@ def _clean_name(raw: str, faction_name: str) -> str:
     for role in _ROLES:
         name = re.sub(rf"\b{re.escape(role)}\b", " ", name, flags=re.IGNORECASE)
     name = re.sub(r"[^A-Za-z0-9 _.\-]", " ", name)
-    words = [w for w in name.split() if w.lower() not in _NOISE_WORDS]
+    words = [
+        w for w in name.split()
+        if w.lower() not in _NOISE_WORDS and w.lower() not in _MEMBER_JUNK_WORDS
+    ]
     return " ".join(words).strip()
+
+
+def _standalone_score_tokens(line: str) -> list[str]:
+    return [tok for tok in _STANDALONE_SCORE_RE.findall(line) if _is_score_token(tok)]
+
+
+def _pick_score_token(line: str) -> str | None:
+    tokens = _standalone_score_tokens(line)
+    if not tokens:
+        return None
+    grouped = [tok for tok in tokens if _GROUPED_SCORE_RE.fullmatch(tok)]
+    return grouped[-1] if grouped else tokens[-1]
+
+
+def _is_meaningful_member_name(name: str) -> bool:
+    if not name or name.isdigit():
+        return False
+    words = [w for w in name.split() if w.lower() not in _MEMBER_JUNK_WORDS]
+    if not words:
+        return False
+    compact = "".join(words)
+    return len(compact) >= 3 and any(ch.isalpha() for ch in compact)
 
 
 def parse_member_rows(text: str, faction_name: str = "The Sworn Few") -> list[MemberScore]:
     """Parse member rows (name + score) from leaderboard OCR text.
 
-    Handles both the feud FACTION tab ("1 Ajay351538 LEVEL 147 Recruit
-    108,965,741") and the faction-event MY FACTION tab ("4 Robert507956
-    The Sworn Few 8,525,740"). Rank/level/role are ignored; only the name
-    and score are kept.
+    Handles the feud FACTION tab ("1 Ajay351538 LEVEL 147 Recruit
+    108,965,741"), same-line faction-event rows ("4 Robert507956
+    The Sworn Few 8,525,740"), and multi-line OCR where a member's name,
+    faction line, and score land on separate lines. Digits glued to a
+    username are part of the name, not a score. Rank/level/role are
+    ignored except for an explicit rank prefix; only name + score matter.
     """
     text = _strip_my_rank_bar(text)
     rows: list[MemberScore] = []
-    for line in text.splitlines():
-        line = line.strip()
+    pending_name: str | None = None
+    pending_rank: int | None = None
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
         if not line:
             continue
-        score_tokens = [tok for tok in _SCORE_RE.findall(line) if _is_score_token(tok)]
-        if not score_tokens:
+
+        standalone_rank = re.fullmatch(r"(\d{1,3})", line)
+        if standalone_rank and 1 <= int(standalone_rank.group(1)) <= 100:
+            pending_rank = int(standalone_rank.group(1))
             continue
-        score = _to_int(score_tokens[-1])
-        rank = None
+
+        score_token = _pick_score_token(line)
         rank_match = _RANK_PREFIX_RE.match(line)
+        line_rank = None
         body = line
-        if rank_match and _to_int(rank_match.group(1)) != score:
-            rank = int(rank_match.group(1))
+        if rank_match and score_token is not None and _to_int(rank_match.group(1)) != _to_int(score_token):
+            line_rank = int(rank_match.group(1))
             body = line[rank_match.end():]
-        body = body.replace(score_tokens[-1], " ")
-        name = _clean_name(body, faction_name)
-        if not name or name.isdigit():
+        elif score_token is None:
+            # A name line that starts with its rank, e.g. "10 Singh 86".
+            # Require whitespace after the rank so top-bar values like
+            # "2.08k" are not mistaken for rank 2.
+            name_rank_match = re.match(r"^\s*(\d{1,3})\s+(.+)$", line)
+            if name_rank_match:
+                candidate_rank = int(name_rank_match.group(1))
+                if 1 <= candidate_rank <= 100:
+                    pending_rank = candidate_rank
+                    body = name_rank_match.group(2)
+
+        if score_token is not None:
+            score = _to_int(score_token)
+            body = body.replace(score_token, " ")
+            name = _clean_name(body, faction_name)
+            if not _is_meaningful_member_name(name):
+                name = pending_name or ""
+            if _is_meaningful_member_name(name):
+                rows.append(
+                    MemberScore(name=name, score=score, rank=line_rank or pending_rank)
+                )
+            pending_name = None
+            pending_rank = None
             continue
-        rows.append(MemberScore(name=name, score=score, rank=rank))
+
+        name = _clean_name(body, faction_name)
+        if _is_meaningful_member_name(name):
+            pending_name = name
+
     return rows
 
 
@@ -304,4 +383,5 @@ def merge_parse_results(results: list[ParseResult]) -> ParseResult:
     expected = merged.faction_result.members if merged.faction_result else None
     faction_total = merged.faction_result.score if merged.faction_result else None
     merged.warnings.extend(validate_rows(rows, expected_members=expected, faction_total=faction_total))
+    merged.warnings = list(dict.fromkeys(merged.warnings))
     return merged
