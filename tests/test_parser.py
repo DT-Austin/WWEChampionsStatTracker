@@ -62,6 +62,19 @@ RANK PLAYER
 My Rank 21 Austinmdg2 The Sworn Few Points 6,063,200
 """
 
+LIVE_FACTION_LEADERBOARD_OCR = """LEADERBOARD
+73 @ghulkamaniacs rule Gi 411,254,330
+Tier 116 Members: 100/100
+77 eno drama zone Gi 386.399.480
+Tier 121 Members: 96/100
+78 » the sworn few Gi 385,969,180
+Tier 100 Members: 95/100
+79 [Wy jcome join all Gi 384.835.250
+Tier 80 Members: 91/100
+My Rank
+The Sworn Few
+"""
+
 
 class ParserTests(unittest.TestCase):
     def test_feud_faction_tab_rows_match_sample_data(self):
@@ -79,6 +92,15 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(sworn[0].tier, 100)
         self.assertEqual(sworn[0].members, 90)
         self.assertEqual(sworn[0].score, 1_642_180_822)
+
+    def test_live_faction_leaderboard_ocr(self):
+        result = parse_screenshot_text(LIVE_FACTION_LEADERBOARD_OCR)
+        self.assertEqual(result.screen_type, "faction_leaderboard")
+        self.assertIsNotNone(result.faction_result)
+        self.assertEqual(result.faction_result.rank, 78)
+        self.assertEqual(result.faction_result.score, 385_969_180)
+        self.assertEqual(result.faction_result.tier, 100)
+        self.assertEqual(result.faction_result.members, 95)
 
     def test_previous_results_screen(self):
         result = parse_screenshot_text(PREVIOUS_RESULTS)

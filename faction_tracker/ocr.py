@@ -96,6 +96,6 @@ def ocr_image(path: str | Path) -> str:
 
     try:
         with Image.open(path) as image:
-            return pytesseract.image_to_string(image)
+            return pytesseract.image_to_string(image, config="--psm 6")
     except Exception as exc:  # unreadable image, Tesseract runtime error, ...
         raise OCRUnavailable(f"OCR failed for {path}: {exc}") from exc

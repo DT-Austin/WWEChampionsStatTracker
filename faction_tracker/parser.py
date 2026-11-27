@@ -20,8 +20,10 @@ import re
 
 from .models import FactionResult, MemberScore, ParseResult
 
-# A score is a comma-grouped number (e.g. 108,965,741) or a bare 0 / small int.
-_SCORE_RE = re.compile(r"\d{1,3}(?:,\d{3})+|\d+")
+# A score is a grouped number (e.g. 108,965,741; OCR sometimes uses dots)
+# or a bare 0 / small int.
+_GROUPED_SCORE_RE = re.compile(r"\d{1,3}(?:[,.]\d{3})+")
+_SCORE_RE = re.compile(r"\d{1,3}(?:[,.]\d{3})+|\d+")
 _LEVEL_RE = re.compile(r"\bLEVEL\s*\d+\b", re.IGNORECASE)
 _TIER_RE = re.compile(r"\bTIER\s*(\d+)\b", re.IGNORECASE)
 _MEMBERS_RE = re.compile(r"\bMEMBERS:?\s*(\d+)\b", re.IGNORECASE)
@@ -36,15 +38,17 @@ _NOISE_WORDS = {
     "prizes", "dominate", "amazing", "trophies", "boosts",
     "provide", "feud",
 }
+# Standalone OCR junk from faction icons/logos next to names and scores.
+_FACTION_JUNK_WORDS = {"gi", "ww", "w", "wy", "ws", "g", "i", "feinis"}
 
 
 def _to_int(token: str) -> int:
-    return int(token.replace(",", ""))
+    return int(token.replace(",", "").replace(".", ""))
 
 
 def _is_score_token(token: str) -> bool:
-    """Scores are comma-grouped, zero, or at least 4 digits (levels/ranks are small)."""
-    if "," in token:
+    """Scores are grouped, zero, or at least 4 digits (levels/ranks are small)."""
+    if _GROUPED_SCORE_RE.fullmatch(token):
         return True
     value = int(token)
     return value == 0 or value >= 1000
@@ -58,13 +62,36 @@ def _strip_my_rank_bar(text: str) -> str:
     return text
 
 
+def _normalize_faction_name(name: str) -> str:
+    words = re.sub(r"[^A-Za-z0-9 ]", " ", name.lower()).split()
+    words = [w for w in words if w not in _FACTION_JUNK_WORDS and w not in _NOISE_WORDS]
+    return " ".join(words)
+
+
+def _faction_name_matches(parsed_name: str, faction_name: str) -> bool:
+    parsed = _normalize_faction_name(parsed_name)
+    target = _normalize_faction_name(faction_name)
+    if not parsed or not target:
+        return False
+    if parsed == target or parsed.startswith(target + " "):
+        return True
+    parsed_words = parsed.split()
+    target_words = target.split()
+    return any(
+        parsed_words[i:i + len(target_words)] == target_words
+        for i in range(len(parsed_words) - len(target_words) + 1)
+    ) or parsed.replace(" ", "") == target.replace(" ", "")
+
+
 def classify_screen(text: str) -> str:
     upper = text.upper()
     if "MILESTONE" in upper:
         return "milestones"
     if "PREVIOUS RESULTS" in upper:
         return "faction_results"
-    if "TOP 100" in upper and "TIER" in upper:
+    if "TIER" in upper and "MEMBERS" in upper and (
+        "TOP 100" in upper or "LEADERBOARD" in upper or _GROUPED_SCORE_RE.search(text)
+    ):
         return "faction_leaderboard"
     if "MY FACTION" in upper or ("LEADERBOARD" in upper and "PLAYER" in upper):
         return "faction_event_leaderboard"
@@ -78,7 +105,7 @@ def parse_milestone_total(text: str) -> int | None:
     values = [
         _to_int(tok)
         for tok in _SCORE_RE.findall(text)
-        if "," in tok and _to_int(tok) >= 1_000_000
+        if _GROUPED_SCORE_RE.fullmatch(tok) and _to_int(tok) >= 1_000_000
     ]
     return max(values) if values else None
 
@@ -127,13 +154,16 @@ def parse_member_rows(text: str, faction_name: str = "The Sworn Few") -> list[Me
 
 
 def parse_faction_rows(text: str) -> list[FactionResult]:
-    """Parse faction rows from the TOP 100 tab / PREVIOUS RESULTS screen."""
+    """Parse faction rows from faction leaderboard / PREVIOUS RESULTS screens.
+
+    Live leaderboard screenshots put the name + score on one OCR line and
+    "Tier N Members: X/100" on the next line, so tier/members are attached
+    from the following line when they are not on the score line itself.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     rows: list[FactionResult] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        score_tokens = [tok for tok in _SCORE_RE.findall(line) if "," in tok]
+    for index, line in enumerate(lines):
+        score_tokens = [tok for tok in _SCORE_RE.findall(line) if _GROUPED_SCORE_RE.fullmatch(tok)]
         if not score_tokens:
             continue
         score = _to_int(score_tokens[-1])
@@ -145,11 +175,18 @@ def parse_faction_rows(text: str) -> list[FactionResult]:
             body = line[rank_match.end():]
         tier_match = _TIER_RE.search(body)
         members_match = _MEMBERS_RE.search(body)
+        if (tier_match is None or members_match is None) and index + 1 < len(lines):
+            next_line = lines[index + 1]
+            tier_match = tier_match or _TIER_RE.search(next_line)
+            members_match = members_match or _MEMBERS_RE.search(next_line)
         body = _TIER_RE.sub(" ", body)
         body = _MEMBERS_RE.sub(" ", body)
         body = body.replace(score_tokens[-1], " ")
         body = re.sub(r"[^A-Za-z0-9 _.\-]", " ", body)
-        words = [w for w in body.split() if w.lower() not in _NOISE_WORDS]
+        words = [
+            w for w in body.split()
+            if w.lower() not in _NOISE_WORDS and w.lower() not in _FACTION_JUNK_WORDS
+        ]
         name = " ".join(words).strip()
         if not name:
             continue
@@ -228,7 +265,7 @@ def parse_screenshot_text(
     if screen in ("faction_leaderboard", "faction_results"):
         faction_rows = parse_faction_rows(text)
         for row in faction_rows:
-            if row.faction.lower() == faction_name.lower():
+            if _faction_name_matches(row.faction, faction_name):
                 result.faction_result = row
                 break
         if result.faction_result is None and faction_rows:
